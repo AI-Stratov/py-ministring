@@ -1,0 +1,12 @@
+include README.md
+include pyproject.toml
+include setup.py
+recursive-include src *.c *.h
+recursive-include tests *.py
+exclude test_manual.py
+global-exclude __pycache__
+global-exclude *.py[co]
+global-exclude .DS_Store
+global-exclude *.so
+global-exclude *.pyd
+
