@@ -30,9 +30,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/py-ministring"
-Repository = "https://github.com/yourusername/py-ministring.git"
-Issues = "https://github.com/yourusername/py-ministring/issues"
+Homepage = "https://github.com/AI-Stratov/py-ministring"
+Repository = "https://github.com/AI-Stratov/py-ministring.git"
+Issues = "https://github.com/AI-Stratov/py-ministring/issues"
 
 [project.optional-dependencies]
 test = ["pytest>=6.0"]
