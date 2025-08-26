@@ -11,7 +11,7 @@ py-ministring implements a new string-like type `Utf8String` with efficient Unic
 - **Compact Storage**: Stores original UTF-8 bytes instead of wide characters
 - **O(1) Indexing**: Uses offset table for fast character access
 - **Hash Caching**: Speeds up comparison operations and dictionary usage
-- **Compatibility**: Full compatibility with regular Python strings
+- **Protocol Compatibility**: Implements core Python string protocols (indexing, slicing, equality, hashing)
 
 ## Installation
 
