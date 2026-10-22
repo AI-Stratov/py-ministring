@@ -10,6 +10,21 @@ int utf8_char_length(unsigned char first_byte) {
     return 1; // Invalid UTF-8, treat as single byte
 }
 
+// Decode one UTF-8 character of char_len bytes into a codepoint
+static Py_UCS4 utf8_decode(const unsigned char *p, int char_len) {
+    switch (char_len) {
+    case 1:
+        return p[0];
+    case 2:
+        return ((Py_UCS4)(p[0] & 0x1F) << 6) | (p[1] & 0x3F);
+    case 3:
+        return ((Py_UCS4)(p[0] & 0x0F) << 12) | ((Py_UCS4)(p[1] & 0x3F) << 6) | (p[2] & 0x3F);
+    default:
+        return ((Py_UCS4)(p[0] & 0x07) << 18) | ((Py_UCS4)(p[1] & 0x3F) << 12) |
+               ((Py_UCS4)(p[2] & 0x3F) << 6) | (p[3] & 0x3F);
+    }
+}
+
 // Count UTF-8 codepoints in a byte string
 int utf8_codepoint_count(const char *data, Py_ssize_t size) {
     int count = 0;
@@ -170,30 +185,59 @@ static Py_hash_t Utf8String_hash(Utf8StringObject *self) {
     return self->hash;
 }
 
+// Compare with a str codepoint by codepoint. Asking the str for its UTF-8
+// form instead would make CPython cache a UTF-8 copy inside every non-ASCII
+// str this object is ever compared with.
+static int Utf8String_equals_unicode(Utf8StringObject *self, PyObject *other) {
+#if PY_VERSION_HEX < 0x030C0000
+    if (PyUnicode_READY(other) < 0) {
+        return -1;
+    }
+#endif
+    if (PyUnicode_GET_LENGTH(other) != self->length) {
+        return 0;
+    }
+
+    if (PyUnicode_IS_ASCII(other)) {
+        // An ASCII str stores one byte per character, which is already UTF-8
+        return self->utf8_size == self->length &&
+               memcmp(self->utf8_data, PyUnicode_DATA(other), self->utf8_size) == 0;
+    }
+
+    int kind = PyUnicode_KIND(other);
+    const void *data = PyUnicode_DATA(other);
+    const unsigned char *p = (const unsigned char *)self->utf8_data;
+
+    for (Py_ssize_t i = 0; i < self->length; i++) {
+        int char_len = utf8_char_length(*p);
+        if (utf8_decode(p, char_len) != PyUnicode_READ(kind, data, i)) {
+            return 0;
+        }
+        p += char_len;
+    }
+    return 1;
+}
+
 // Equality comparison
 static PyObject *Utf8String_richcompare(Utf8StringObject *self, PyObject *other, int op) {
     if (op != Py_EQ && op != Py_NE) {
         Py_RETURN_NOTIMPLEMENTED;
     }
 
-    const char *other_data;
-    Py_ssize_t other_size;
+    int equal;
 
     if (Py_TYPE(other) == &Utf8StringType) {
         Utf8StringObject *other_utf8 = (Utf8StringObject *)other;
-        other_data = other_utf8->utf8_data;
-        other_size = other_utf8->utf8_size;
+        equal = (self->utf8_size == other_utf8->utf8_size) &&
+                (memcmp(self->utf8_data, other_utf8->utf8_data, self->utf8_size) == 0);
     }
     else if (PyUnicode_Check(other)) {
-        other_data = PyUnicode_AsUTF8AndSize(other, &other_size);
-        if (!other_data) return NULL;
+        equal = Utf8String_equals_unicode(self, other);
+        if (equal < 0) return NULL;
     }
     else {
         Py_RETURN_NOTIMPLEMENTED;
     }
-
-    int equal = (self->utf8_size == other_size) &&
-                (memcmp(self->utf8_data, other_data, self->utf8_size) == 0);
 
     if (op == Py_EQ) {
         return PyBool_FromLong(equal);
@@ -299,6 +343,28 @@ PyObject *Utf8String_FromUTF8(const char *data, Py_ssize_t size) {
     return (PyObject *)self;
 }
 
+// Create a Utf8String from a str. PyUnicode_AsUTF8AndSize() is not used for
+// non-ASCII input: it caches a UTF-8 copy inside the source str for the rest
+// of its life, which doubles the memory the caller was trying to save.
+static PyObject *Utf8String_FromUnicode(PyObject *obj) {
+#if PY_VERSION_HEX < 0x030C0000
+    if (PyUnicode_READY(obj) < 0) {
+        return NULL;
+    }
+#endif
+    if (PyUnicode_IS_ASCII(obj)) {
+        // An ASCII str stores one byte per character, which is already UTF-8
+        return Utf8String_FromUTF8(PyUnicode_DATA(obj), PyUnicode_GET_LENGTH(obj));
+    }
+
+    PyObject *bytes = PyUnicode_AsUTF8String(obj);
+    if (!bytes) return NULL;
+
+    PyObject *result = Utf8String_FromUTF8(PyBytes_AS_STRING(bytes), PyBytes_GET_SIZE(bytes));
+    Py_DECREF(bytes);
+    return result;
+}
+
 // Python wrapper for constructor
 static PyObject *ministr_function(PyObject *self, PyObject *args) {
     PyObject *obj = NULL;
@@ -312,25 +378,14 @@ static PyObject *ministr_function(PyObject *self, PyObject *args) {
     }
 
     if (PyUnicode_Check(obj)) {
-        Py_ssize_t size;
-        const char *data = PyUnicode_AsUTF8AndSize(obj, &size);
-        if (!data) return NULL;
-
-        return Utf8String_FromUTF8(data, size);
+        return Utf8String_FromUnicode(obj);
     }
 
     // Try to convert to string first
     PyObject *str_obj = PyObject_Str(obj);
     if (!str_obj) return NULL;
 
-    Py_ssize_t size;
-    const char *data = PyUnicode_AsUTF8AndSize(str_obj, &size);
-    if (!data) {
-        Py_DECREF(str_obj);
-        return NULL;
-    }
-
-    PyObject *result = Utf8String_FromUTF8(data, size);
+    PyObject *result = Utf8String_FromUnicode(str_obj);
     Py_DECREF(str_obj);
     return result;
 }

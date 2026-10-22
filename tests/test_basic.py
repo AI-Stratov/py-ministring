@@ -124,3 +124,18 @@ def test_large_unicode():
     assert "世" in str(s)
     assert "🌍" in str(s)
     assert "М" in str(s)
+
+def test_equality_with_non_ascii_str():
+    """Equality with str compares codepoints, not just lengths"""
+    s = ministr("café😃")
+    assert s == "café😃"
+    assert s != "cafe😃"
+    assert s != "café😄"
+    assert s != "café"
+    assert ministr("abé") != "abc"
+    assert ministr("abc") != "abé"
+
+def test_equality_with_lone_surrogate():
+    """A str with a lone surrogate has no UTF-8 form and is simply not equal"""
+    assert ministr("a") != "\ud800"
+    assert not (ministr("a") == "\ud800")
