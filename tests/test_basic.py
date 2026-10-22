@@ -124,3 +124,51 @@ def test_large_unicode():
     assert "世" in str(s)
     assert "🌍" in str(s)
     assert "М" in str(s)
+
+def test_equality_with_non_ascii_str():
+    """Equality with str compares codepoints, not just lengths"""
+    s = ministr("café😃")
+    assert s == "café😃"
+    assert s != "cafe😃"
+    assert s != "café😄"
+    assert s != "café"
+    assert ministr("abé") != "abc"
+    assert ministr("abc") != "abé"
+
+def test_equality_with_lone_surrogate():
+    """A str with a lone surrogate has no UTF-8 form and is simply not equal"""
+    assert ministr("a") != "\ud800"
+    assert not (ministr("a") == "\ud800")
+
+def test_iteration():
+    """Iteration yields one-character strings, like str"""
+    text = "hello 😃 wörld"
+    assert list(ministr(text)) == list(text)
+    assert list(ministr("")) == []
+
+    it = iter(ministr("ab"))
+    assert iter(it) is it
+    assert next(it) == "a"
+    assert next(it) == "b"
+    with pytest.raises(StopIteration):
+        next(it)
+    with pytest.raises(StopIteration):
+        next(it)
+
+def test_contains_substring():
+    """`in` searches for substrings, like str"""
+    s = ministr("hello 😃 world")
+    assert "lo" in s
+    assert "😃 w" in s
+    assert "h" in s
+    assert "" in s
+    assert ministr("world") in s
+    assert "x" not in s
+    assert "world!" not in s
+    assert "\ud800" not in s
+    assert "" in ministr("")
+    assert "a" not in ministr("")
+
+def test_contains_requires_string():
+    with pytest.raises(TypeError):
+        1 in ministr("123")

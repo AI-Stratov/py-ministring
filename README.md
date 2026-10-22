@@ -1,24 +1,66 @@
 # py-ministring
 
-Experimental compact UTF-8 string type for CPython as a C-extension.
+An experimental UTF-8 string type for CPython, written as a C extension.
+It is a learning project about how CPython stores strings, not a
+replacement for `str`.
 
-## Description
+## The idea
 
-py-ministring implements a new string-like type `Utf8String` with efficient Unicode indexing and slicing. This prototype is designed to reduce memory footprint when working with texts containing predominantly ASCII characters with occasional multi-byte characters (like emojis).
+CPython's `str` ([PEP 393](https://peps.python.org/pep-0393/)) stores every
+character with the width of the widest one in the string: 1 byte if all
+characters are below U+0100, 2 bytes if any is above that, 4 bytes if any is
+outside the Basic Multilingual Plane. A megabyte of ASCII with a single emoji
+therefore takes 4 MB as a `str`.
 
-## Why py-ministring?
+`ministr` stores the text as UTF-8 instead, where each character takes only
+as many bytes as it needs.
 
-- **Compact Storage**: Stores original UTF-8 bytes instead of wide characters
-- **O(1) Indexing**: Uses offset table for fast character access
-- **Hash Caching**: Speeds up comparison operations and dictionary usage
-- **Protocol Compatibility**: Implements core Python string protocols (indexing, slicing, equality, hashing)
+## Memory
+
+Bytes per character for 1,000,000 characters (Python 3.13, 64-bit Linux),
+produced by [`benchmarks/memory.py`](benchmarks/memory.py):
+
+| Text | `str` | `ministr` | `ministr` after `s[0]` |
+|---|---|---|---|
+| ASCII | 1.00 | 1.00 | 1.00 |
+| ASCII + one emoji | 4.00 | 1.00 | 1.13 |
+| ASCII + one € | 2.00 | 1.00 | 1.13 |
+| Latin-1 (café) | 1.00 | 1.25 | 1.38 |
+| Cyrillic | 2.00 | 2.00 | 2.13 |
+| CJK | 2.00 | 3.00 | 3.13 |
+
+So `ministr` only wins on text that is mostly narrow characters with a few
+wide ones. On pure ASCII it ties with `str`. On Latin-1, Cyrillic or CJK
+text, UTF-8 is as large as or larger than CPython's fixed-width storage.
+Short strings cost more too: the object header is 56 bytes, against 40 for
+an ASCII `str`.
+
+## Indexing
+
+UTF-8 has variable-width characters, so finding character `i` needs to know
+where it starts:
+
+- **ASCII strings** never need an index: character `i` is byte `i`.
+- **Other strings** build a sparse index on the first `s[i]` or `s[a:b]`. It
+  stores the byte offset of every 64th character, 8 bytes per 64 characters
+  or 0.125 bytes per character. A lookup jumps to the nearest entry and
+  scans forward at most 63 characters, so access is O(1) with a bounded
+  constant.
+- **Iteration** (`for ch in s`, `list(s)`, `"".join(s)`) walks the bytes and
+  never builds the index.
+
+The sparse index makes random access slower. On mixed-width text a random
+`s[i]` takes about 165 ns, against about 30 ns for `str`. A full table
+(one offset per character, as in 0.1.x) gave about 60 ns but cost 4 bytes
+per character. `MINISTR_INDEX_STRIDE` in `src/ministring.h` sets the
+trade-off: a stride of 32 gives about 110 ns at 0.25 bytes per character.
 
 ## Installation
 
 ```bash
 git clone https://github.com/AI-Stratov/py-ministring
 cd py-ministring
-python setup.py build_ext --inplace
+pip install .
 ```
 
 ## Usage
@@ -26,129 +68,111 @@ python setup.py build_ext --inplace
 ```python
 from ministring import ministr
 
-# Create a string
 s = ministr("hello 😃 world")
 
-# Length in codepoints
-print(len(s))      # 13
+len(s)          # 13
+s[6]            # '😃' (a regular str)
+s[-1]           # 'd'
+s[0:5]          # 'hello' (a new ministr)
+str(s[8:])      # 'world'
+list(s[4:7])    # ['o', ' ', '😃']
 
-# Indexing
-print(s[6])        # "😃"
-print(s[0])        # "h"
-print(s[-1])       # "d"
+"lo" in s       # True
+s == "hello 😃 world"   # True, works both ways and with other ministr
 
-# Slicing
-print(str(s[0:5]))    # "hello"
-print(str(s[6:7]))    # "😃"
-print(str(s[8:]))     # "world"
-
-# Convert to regular string
-print(str(s))      # "hello 😃 world"
-
-# Comparison
-assert s == "hello 😃 world"
-assert "hello 😃 world" == s
-
-# Hashing (can use in dict/set)
 d = {s: "value"}
-s2 = ministr("hello 😃 world")
-print(d[s2])       # "value"
+d["hello 😃 world"]     # 'value': hash(s) == hash(str(s))
 ```
 
 ## API
 
-### Constructor
+- `ministr(obj="")` creates a `ministring.Utf8String` from a `str`, or from
+  `str(obj)` for anything else. Strings with lone surrogates have no UTF-8
+  form and raise `UnicodeEncodeError`.
+- `len(s)` is the number of codepoints.
+- `s[i]` returns the character as a `str`. Negative indices work.
+- `s[a:b]` returns a new `Utf8String`. Steps other than 1 raise
+  `NotImplementedError`.
+- `iter(s)` yields characters as `str`.
+- `x in s` searches for a substring. `x` can be a `str` or a `Utf8String`.
+- `s == x` and `s != x` compare with a `str` or a `Utf8String`.
+- `hash(s)` equals `hash(str(s))`, so `ministr` and `str` keys find each
+  other in dicts and sets. It is computed once and cached.
+- `str(s)` and `repr(s)` behave like those of the equivalent `str`.
+- `sys.getsizeof(s)` includes the UTF-8 buffer and, once built, the index.
 
-- `ministr(obj)` - creates a new Utf8String object from a string or str()-convertible object
+## Limitations
 
-### Methods
+This is a prototype:
 
-- `len(s)` - returns the number of Unicode codepoints
-- `s[i]` - returns character at index as a regular Python string
-- `s[start:stop]` - returns a new Utf8String with slice
-- `str(s)` - converts to regular Python string
-- `repr(s)` - string representation for debugging
-- `hash(s)` - hash value (cached)
-- `s == other` - comparison with other Utf8String or regular strings
+- It is not a `str` subclass. Most of the standard library wants a real
+  `str`, so pass `str(s)`.
+- There are no string methods (`find`, `split`, `upper`, ...), no
+  concatenation, no ordering comparisons and no pickling.
+- `str(s)` decodes the whole string every time.
+- Random access on non-ASCII text is about 5 times slower than `str` (see
+  [Indexing](#indexing)).
+- `in` is a plain byte search, O(n·m) in the worst case.
+- CI covers Python 3.9 to 3.14.
 
-## Data Structure
+## Tests
+
+```bash
+pip install . pytest
+python -X dev -m pytest
+```
+
+`-X dev` turns on CPython's debug allocator, which fills new memory with
+`0xCD`, so code that reads an uninitialized field crashes instead of passing
+by luck. `tests/test_oom.py` uses `_testcapi.set_nomemory()` to make each
+allocation fail in turn and checks that every failure becomes a
+`MemoryError`.
+
+CI also builds the extension with AddressSanitizer and
+UndefinedBehaviorSanitizer. To do the same locally on Linux:
+
+```bash
+CFLAGS="-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -g" \
+LDFLAGS="-fsanitize=address,undefined" pip install . pytest
+
+LD_PRELOAD="$(gcc -print-file-name=libasan.so)" PYTHONMALLOC=malloc \
+ASAN_OPTIONS=detect_leaks=0 python -m pytest
+```
+
+The interpreter is not instrumented, so the ASan runtime is preloaded.
+`PYTHONMALLOC=malloc` sends every allocation through ASan instead of
+pymalloc.
+
+## Data structure
 
 ```c
 typedef struct {
     PyObject_HEAD
-    char *utf8_data;        // UTF-8 bytes
+    char *utf8_data;        // UTF-8 encoded bytes
     Py_ssize_t utf8_size;   // size in bytes
-    int32_t *offsets;       // offset table: codepoint → byte
+    Py_ssize_t *index;      // sparse index: codepoint / 64 -> byte offset;
+                            // built on first indexing, never for ASCII
     Py_ssize_t length;      // number of codepoints
     Py_hash_t hash;         // cached hash
 } Utf8StringObject;
 ```
 
-## Testing
+## Changes since 0.1.1
 
-Run tests with pytest:
-
-```bash
-pip install pytest
-pytest -v
-```
-
-## Limitations
-
-⚠️ **WARNING**: This is an experimental prototype, not intended for production use!
-
-- Missing support for many string methods (`find`, `replace`, etc.)
-- May be slower than regular strings for some operations
-- No support for step slicing (`s[::2]`)
-- Limited handling of invalid UTF-8
-- No optimizations for very long strings
-
-## Technical Details
-
-### C API
-
-Core functions for working with Utf8String:
-
-- `Utf8String_FromUTF8(data, size)` - create from UTF-8 data
-- `utf8_codepoint_count(data, size)` - count codepoints
-- `build_offset_table(self)` - build offset table
-- `utf8_char_length(first_byte)` - determine UTF-8 character length
-
-### Architecture
-
-1. **Data Storage**: Original UTF-8 bytes are preserved unchanged
-2. **Indexing**: Offset table built on-demand for O(1) access
-3. **Caching**: Hash values cached for faster comparisons
-4. **Compatibility**: Full support for Python protocols (sequence, mapping)
-
-## Usage Examples
-
-### Working with Emojis
-
-```python
-s = ministr("Hello 👋 world 🌍!")
-print(f"Length: {len(s)}")           # Length: 14
-print(f"Emojis: {s[6]}, {s[12]}")    # Emojis: 👋, 🌍
-```
-
-### Multi-language Text Processing
-
-```python
-s = ministr("Hello 世界 🌍 Мир")
-print(f"English: {str(s[0:5])}")     # Hello
-print(f"Chinese: {str(s[6:8])}")     # 世界
-print(f"Emoji: {s[9]}")              # 🌍
-print(f"Russian: {str(s[11:14])}")   # Мир
-```
-
-### Performance
-
-```python
-# Creating many strings with emojis
-texts = [ministr(f"Text {i} 😀") for i in range(1000)]
-text_set = set(texts)  # Fast thanks to cached hash
-```
+- The first `s[i]` used to build a 4-byte offset for every character, which
+  made indexed strings 4 bytes per character larger than the matching
+  `str`. That table is now the sparse index described above.
+- `ministr(text)` and `ministr == text` used to call
+  `PyUnicode_AsUTF8AndSize()`. That call caches a UTF-8 copy inside `text`
+  for as long as `text` lives, which doubled the real cost of a `ministr`
+  for non-ASCII text.
+- If allocating the UTF-8 buffer failed, the destructor freed an
+  uninitialized pointer. ASan and `-X dev` both catch it.
+- Iteration no longer builds an index.
+- `in` searches for substrings. It used to compare the needle with each
+  single character.
+- `sys.getsizeof()` reports the buffers a `ministr` owns.
 
 ## License
 
-Experimental code for educational purposes.
+MIT, see [LICENCE](LICENCE).
