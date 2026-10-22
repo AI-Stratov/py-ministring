@@ -58,6 +58,14 @@ trade-off: a stride of 32 gives about 110 ns at 0.25 bytes per character.
 ## Installation
 
 ```bash
+pip install py-ministring
+```
+
+Wheels are published for CPython 3.9 to 3.15 on Linux (x86_64, aarch64),
+macOS (Intel, Apple Silicon) and Windows (x64, Arm64). Anywhere else pip
+builds from source, which needs a C compiler. From a clone:
+
+```bash
 git clone https://github.com/AI-Stratov/py-ministring
 cd py-ministring
 pip install .
@@ -113,7 +121,6 @@ This is a prototype:
 - Random access on non-ASCII text is about 5 times slower than `str` (see
   [Indexing](#indexing)).
 - `in` is a plain byte search, O(n·m) in the worst case.
-- CI covers Python 3.9 to 3.14.
 
 ## Tests
 
@@ -121,6 +128,9 @@ This is a prototype:
 pip install . pytest
 python -X dev -m pytest
 ```
+
+CI runs them on Python 3.9 to 3.15 on Linux and on 3.13 on macOS and
+Windows. Release wheels are tested too, each on its own platform.
 
 `-X dev` turns on CPython's debug allocator, which fills new memory with
 `0xCD`, so code that reads an uninitialized field crashes instead of passing
