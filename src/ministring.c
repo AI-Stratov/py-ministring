@@ -246,6 +246,20 @@ static PyObject *Utf8String_richcompare(Utf8StringObject *self, PyObject *other,
     }
 }
 
+// __sizeof__ method: the object plus the buffers it owns
+static PyObject *Utf8String_sizeof(Utf8StringObject *self, PyObject *Py_UNUSED(ignored)) {
+    Py_ssize_t size = Py_TYPE(self)->tp_basicsize + self->utf8_size + 1;
+    if (self->offsets) {
+        size += (self->length + 1) * sizeof(int32_t);
+    }
+    return PyLong_FromSsize_t(size);
+}
+
+static PyMethodDef Utf8String_methods[] = {
+    {"__sizeof__", (PyCFunction)Utf8String_sizeof, METH_NOARGS, "Size in memory, in bytes"},
+    {NULL, NULL, 0, NULL}
+};
+
 // Sequence protocol
 static PySequenceMethods Utf8String_as_sequence = {
     (lenfunc)Utf8String_length,     // sq_length
@@ -296,7 +310,7 @@ PyTypeObject Utf8StringType = {
     0,                                    // tp_weaklistoffset
     0,                                    // tp_iter
     0,                                    // tp_iternext
-    0,                                    // tp_methods
+    Utf8String_methods,                   // tp_methods
     0,                                    // tp_members
     0,                                    // tp_getset
     0,                                    // tp_base

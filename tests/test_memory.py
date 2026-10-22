@@ -35,3 +35,9 @@ def test_comparison_does_not_grow_other_str(text):
     assert other == s
     assert not (s != other)
     assert sys.getsizeof(other) == before
+
+
+def test_sizeof_counts_utf8_buffer():
+    empty = sys.getsizeof(ministr(""))
+    text = "a" * 1000 + "\U0001F600"
+    assert sys.getsizeof(ministr(text)) >= empty + len(text.encode())
