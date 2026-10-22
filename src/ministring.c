@@ -276,6 +276,12 @@ PyObject *Utf8String_FromUTF8(const char *data, Py_ssize_t size) {
         return NULL;
     }
 
+    // PyObject_New does not zero memory. Set every pointer the destructor
+    // frees before the first allocation that can fail.
+    self->utf8_data = NULL;
+    self->offsets = NULL;
+    self->hash = -1;
+
     // Copy UTF-8 data
     self->utf8_data = (char *)PyMem_Malloc(size + 1);
     if (!self->utf8_data) {
@@ -289,10 +295,6 @@ PyObject *Utf8String_FromUTF8(const char *data, Py_ssize_t size) {
 
     // Count codepoints
     self->length = utf8_codepoint_count(data, size);
-
-    // Initialize other fields
-    self->offsets = NULL;
-    self->hash = -1;
 
     return (PyObject *)self;
 }
