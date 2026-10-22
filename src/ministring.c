@@ -260,6 +260,81 @@ static PyMethodDef Utf8String_methods[] = {
     {NULL, NULL, 0, NULL}
 };
 
+// Iterator: walks the UTF-8 bytes once, so iterating never needs the
+// offset table
+typedef struct {
+    PyObject_HEAD
+    Utf8StringObject *str;  // NULL once exhausted
+    Py_ssize_t pos;         // byte offset of the next character
+} Utf8StringIterObject;
+
+static void Utf8StringIter_dealloc(Utf8StringIterObject *it) {
+    Py_XDECREF(it->str);
+    Py_TYPE(it)->tp_free((PyObject *)it);
+}
+
+static PyObject *Utf8StringIter_next(Utf8StringIterObject *it) {
+    Utf8StringObject *str = it->str;
+    if (!str) {
+        return NULL;
+    }
+
+    if (it->pos >= str->utf8_size) {
+        it->str = NULL;
+        Py_DECREF(str);
+        return NULL;
+    }
+
+    int char_len = utf8_char_length((unsigned char)str->utf8_data[it->pos]);
+    PyObject *ch = PyUnicode_FromStringAndSize(str->utf8_data + it->pos, char_len);
+    if (ch) {
+        it->pos += char_len;
+    }
+    return ch;
+}
+
+static PyTypeObject Utf8StringIterType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    "ministring.Utf8StringIterator",      // tp_name
+    sizeof(Utf8StringIterObject),         // tp_basicsize
+    0,                                    // tp_itemsize
+    (destructor)Utf8StringIter_dealloc,   // tp_dealloc
+    0,                                    // tp_vectorcall_offset
+    0,                                    // tp_getattr
+    0,                                    // tp_setattr
+    0,                                    // tp_as_async
+    0,                                    // tp_repr
+    0,                                    // tp_as_number
+    0,                                    // tp_as_sequence
+    0,                                    // tp_as_mapping
+    0,                                    // tp_hash
+    0,                                    // tp_call
+    0,                                    // tp_str
+    0,                                    // tp_getattro
+    0,                                    // tp_setattro
+    0,                                    // tp_as_buffer
+    Py_TPFLAGS_DEFAULT,                   // tp_flags
+    "Iterator over a Utf8String",         // tp_doc
+    0,                                    // tp_traverse
+    0,                                    // tp_clear
+    0,                                    // tp_richcompare
+    0,                                    // tp_weaklistoffset
+    PyObject_SelfIter,                    // tp_iter
+    (iternextfunc)Utf8StringIter_next,    // tp_iternext
+};
+
+// __iter__ method
+static PyObject *Utf8String_iter(Utf8StringObject *self) {
+    Utf8StringIterObject *it = PyObject_New(Utf8StringIterObject, &Utf8StringIterType);
+    if (!it) {
+        return NULL;
+    }
+    Py_INCREF(self);
+    it->str = self;
+    it->pos = 0;
+    return (PyObject *)it;
+}
+
 // Sequence protocol
 static PySequenceMethods Utf8String_as_sequence = {
     (lenfunc)Utf8String_length,     // sq_length
@@ -308,7 +383,7 @@ PyTypeObject Utf8StringType = {
     0,                                    // tp_clear
     (richcmpfunc)Utf8String_richcompare,  // tp_richcompare
     0,                                    // tp_weaklistoffset
-    0,                                    // tp_iter
+    (getiterfunc)Utf8String_iter,         // tp_iter
     0,                                    // tp_iternext
     Utf8String_methods,                   // tp_methods
     0,                                    // tp_members
@@ -424,6 +499,9 @@ PyMODINIT_FUNC PyInit_ministring(void) {
     PyObject *module;
 
     if (PyType_Ready(&Utf8StringType) < 0) {
+        return NULL;
+    }
+    if (PyType_Ready(&Utf8StringIterType) < 0) {
         return NULL;
     }
 

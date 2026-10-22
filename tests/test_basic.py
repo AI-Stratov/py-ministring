@@ -139,3 +139,18 @@ def test_equality_with_lone_surrogate():
     """A str with a lone surrogate has no UTF-8 form and is simply not equal"""
     assert ministr("a") != "\ud800"
     assert not (ministr("a") == "\ud800")
+
+def test_iteration():
+    """Iteration yields one-character strings, like str"""
+    text = "hello 😃 wörld"
+    assert list(ministr(text)) == list(text)
+    assert list(ministr("")) == []
+
+    it = iter(ministr("ab"))
+    assert iter(it) is it
+    assert next(it) == "a"
+    assert next(it) == "b"
+    with pytest.raises(StopIteration):
+        next(it)
+    with pytest.raises(StopIteration):
+        next(it)

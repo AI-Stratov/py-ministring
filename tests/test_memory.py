@@ -41,3 +41,10 @@ def test_sizeof_counts_utf8_buffer():
     empty = sys.getsizeof(ministr(""))
     text = "a" * 1000 + "\U0001F600"
     assert sys.getsizeof(ministr(text)) >= empty + len(text.encode())
+
+
+def test_iteration_does_not_build_index():
+    s = ministr("я" * 1000)
+    before = sys.getsizeof(s)
+    assert "".join(s) == "я" * 1000
+    assert sys.getsizeof(s) == before
