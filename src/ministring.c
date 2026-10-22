@@ -47,6 +47,51 @@ static Py_ssize_t utf8_codepoint_count(const char *data, Py_ssize_t size) {
     return count;
 }
 
+// UTF-8 bytes of a str. PyUnicode_AsUTF8AndSize() is not used for non-ASCII
+// strings: it caches a UTF-8 copy inside the str for the rest of its life.
+// Instead the str is encoded into a temporary bytes object, returned in
+// *owner (NULL for ASCII), which the caller releases with Py_XDECREF once
+// done with the data.
+static const char *unicode_as_utf8(PyObject *str, Py_ssize_t *size, PyObject **owner) {
+    *owner = NULL;
+#if PY_VERSION_HEX < 0x030C0000
+    if (PyUnicode_READY(str) < 0) {
+        return NULL;
+    }
+#endif
+    if (PyUnicode_IS_ASCII(str)) {
+        // An ASCII str stores one byte per character, which is already UTF-8
+        *size = PyUnicode_GET_LENGTH(str);
+        return PyUnicode_DATA(str);
+    }
+
+    PyObject *bytes = PyUnicode_AsUTF8String(str);
+    if (!bytes) return NULL;
+
+    *owner = bytes;
+    *size = PyBytes_GET_SIZE(bytes);
+    return PyBytes_AS_STRING(bytes);
+}
+
+// Whether needle occurs in haystack, as bytes. That is enough for UTF-8:
+// a lead byte never looks like a continuation byte, so a match of a valid
+// needle can only start on a character boundary.
+static int bytes_contain(const char *haystack, Py_ssize_t haystack_size,
+                         const char *needle, Py_ssize_t needle_size) {
+    if (needle_size == 0) return 1;
+    if (needle_size > haystack_size) return 0;
+
+    const char *p = haystack;
+    const char *last = haystack + (haystack_size - needle_size);
+    while (p <= last) {
+        p = memchr(p, needle[0], last - p + 1);
+        if (!p) return 0;
+        if (memcmp(p, needle, needle_size) == 0) return 1;
+        p++;
+    }
+    return 0;
+}
+
 // Number of entries in the sparse index
 static Py_ssize_t index_entries(Utf8StringObject *self) {
     return (self->length + MINISTR_INDEX_STRIDE - 1) / MINISTR_INDEX_STRIDE;
@@ -263,6 +308,38 @@ static PyObject *Utf8String_richcompare(Utf8StringObject *self, PyObject *other,
     }
 }
 
+// __contains__ method: substring search, like str
+static int Utf8String_contains(Utf8StringObject *self, PyObject *needle) {
+    const char *data;
+    Py_ssize_t size;
+    PyObject *owner = NULL;
+
+    if (Py_TYPE(needle) == &Utf8StringType) {
+        data = ((Utf8StringObject *)needle)->utf8_data;
+        size = ((Utf8StringObject *)needle)->utf8_size;
+    }
+    else if (PyUnicode_Check(needle)) {
+        data = unicode_as_utf8(needle, &size, &owner);
+        if (!data) {
+            // A lone surrogate has no UTF-8 form, so it cannot occur in self
+            if (PyErr_ExceptionMatches(PyExc_UnicodeEncodeError)) {
+                PyErr_Clear();
+                return 0;
+            }
+            return -1;
+        }
+    }
+    else {
+        PyErr_Format(PyExc_TypeError, "'in <ministr>' requires string as left operand, not %.200s",
+                     Py_TYPE(needle)->tp_name);
+        return -1;
+    }
+
+    int found = bytes_contain(self->utf8_data, self->utf8_size, data, size);
+    Py_XDECREF(owner);
+    return found;
+}
+
 // __sizeof__ method: the object plus the buffers it owns
 static PyObject *Utf8String_sizeof(Utf8StringObject *self, PyObject *Py_UNUSED(ignored)) {
     Py_ssize_t size = Py_TYPE(self)->tp_basicsize + self->utf8_size + 1;
@@ -360,7 +437,7 @@ static PySequenceMethods Utf8String_as_sequence = {
     0,                              // sq_slice (deprecated)
     0,                              // sq_ass_item
     0,                              // sq_ass_slice (deprecated)
-    0,                              // sq_contains
+    (objobjproc)Utf8String_contains, // sq_contains
     0,                              // sq_inplace_concat
     0,                              // sq_inplace_repeat
 };
@@ -448,25 +525,16 @@ PyObject *Utf8String_FromUTF8(const char *data, Py_ssize_t size) {
     return (PyObject *)self;
 }
 
-// Create a Utf8String from a str. PyUnicode_AsUTF8AndSize() is not used for
-// non-ASCII input: it caches a UTF-8 copy inside the source str for the rest
-// of its life, which doubles the memory the caller was trying to save.
+// Create a Utf8String from a str, without leaving a UTF-8 copy cached
+// inside it (see unicode_as_utf8)
 static PyObject *Utf8String_FromUnicode(PyObject *obj) {
-#if PY_VERSION_HEX < 0x030C0000
-    if (PyUnicode_READY(obj) < 0) {
-        return NULL;
-    }
-#endif
-    if (PyUnicode_IS_ASCII(obj)) {
-        // An ASCII str stores one byte per character, which is already UTF-8
-        return Utf8String_FromUTF8(PyUnicode_DATA(obj), PyUnicode_GET_LENGTH(obj));
-    }
+    PyObject *owner;
+    Py_ssize_t size;
+    const char *data = unicode_as_utf8(obj, &size, &owner);
+    if (!data) return NULL;
 
-    PyObject *bytes = PyUnicode_AsUTF8String(obj);
-    if (!bytes) return NULL;
-
-    PyObject *result = Utf8String_FromUTF8(PyBytes_AS_STRING(bytes), PyBytes_GET_SIZE(bytes));
-    Py_DECREF(bytes);
+    PyObject *result = Utf8String_FromUTF8(data, size);
+    Py_XDECREF(owner);
     return result;
 }
 

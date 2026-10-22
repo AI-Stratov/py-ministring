@@ -154,3 +154,21 @@ def test_iteration():
         next(it)
     with pytest.raises(StopIteration):
         next(it)
+
+def test_contains_substring():
+    """`in` searches for substrings, like str"""
+    s = ministr("hello 😃 world")
+    assert "lo" in s
+    assert "😃 w" in s
+    assert "h" in s
+    assert "" in s
+    assert ministr("world") in s
+    assert "x" not in s
+    assert "world!" not in s
+    assert "\ud800" not in s
+    assert "" in ministr("")
+    assert "a" not in ministr("")
+
+def test_contains_requires_string():
+    with pytest.raises(TypeError):
+        1 in ministr("123")

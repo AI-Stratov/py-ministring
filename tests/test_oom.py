@@ -26,6 +26,7 @@ CHILD = textwrap.dedent("""
             list(s)
             hash(s)
             s == text
+            "\\u044f" in s
 
     for start in range({limit}):
         _testcapi.set_nomemory(start)
