@@ -1,3 +1,4 @@
+import struct
 import sys
 
 import pytest
@@ -47,4 +48,23 @@ def test_iteration_does_not_build_index():
     s = ministr("я" * 1000)
     before = sys.getsizeof(s)
     assert "".join(s) == "я" * 1000
+    assert sys.getsizeof(s) == before
+
+
+def test_index_is_sparse():
+    text = "a" * 99_999 + "\U0001F600"
+    s = ministr(text)
+    before = sys.getsizeof(s)
+    assert s[50_000] == "a"
+    grown = sys.getsizeof(s) - before
+    # one Py_ssize_t per 64 codepoints
+    assert 0 < grown <= (len(text) // 64 + 1) * struct.calcsize("n")
+    assert sys.getsizeof(s) < sys.getsizeof(text)
+
+
+def test_ascii_never_builds_index():
+    s = ministr("a" * 10_000)
+    before = sys.getsizeof(s)
+    assert s[5_000] == "a"
+    assert s[100:200] == "a" * 100
     assert sys.getsizeof(s) == before

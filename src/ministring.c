@@ -1,13 +1,20 @@
 #include "ministring.h"
 #include <string.h>
 
-// Helper function to determine UTF-8 character length from first byte
-int utf8_char_length(unsigned char first_byte) {
-    if ((first_byte & 0x80) == 0) return 1;      // 0xxxxxxx
-    if ((first_byte & 0xE0) == 0xC0) return 2;   // 110xxxxx
-    if ((first_byte & 0xF0) == 0xE0) return 3;   // 1110xxxx
-    if ((first_byte & 0xF8) == 0xF0) return 4;   // 11110xxx
-    return 1; // Invalid UTF-8, treat as single byte
+// Helper function to determine UTF-8 character length from first byte.
+// A table lookup on the high nibble instead of a chain of ifs: byte_offset()
+// calls this up to 63 times in a row, and on text that mixes character
+// widths the branches mispredict. Data is always valid UTF-8 (it comes from
+// CPython's encoder), so the table only needs to be right for lead bytes.
+static int utf8_char_length(unsigned char first_byte) {
+    static const unsigned char length_by_high_nibble[16] = {
+        1, 1, 1, 1, 1, 1, 1, 1,  // 0xxxxxxx
+        1, 1, 1, 1,              // 10xxxxxx, continuation byte, not a lead
+        2, 2,                    // 110xxxxx
+        3,                       // 1110xxxx
+        4,                       // 11110xxx
+    };
+    return length_by_high_nibble[first_byte >> 4];
 }
 
 // Decode one UTF-8 character of char_len bytes into a codepoint
@@ -26,8 +33,8 @@ static Py_UCS4 utf8_decode(const unsigned char *p, int char_len) {
 }
 
 // Count UTF-8 codepoints in a byte string
-int utf8_codepoint_count(const char *data, Py_ssize_t size) {
-    int count = 0;
+static Py_ssize_t utf8_codepoint_count(const char *data, Py_ssize_t size) {
+    Py_ssize_t count = 0;
     Py_ssize_t i = 0;
 
     while (i < size) {
@@ -40,30 +47,53 @@ int utf8_codepoint_count(const char *data, Py_ssize_t size) {
     return count;
 }
 
-// Build offset table for O(1) indexing
-void build_offset_table(Utf8StringObject *self) {
-    if (self->offsets) {
-        PyMem_Free(self->offsets);
+// Number of entries in the sparse index
+static Py_ssize_t index_entries(Utf8StringObject *self) {
+    return (self->length + MINISTR_INDEX_STRIDE - 1) / MINISTR_INDEX_STRIDE;
+}
+
+// Build the sparse index: entry k is the byte offset of codepoint
+// k * MINISTR_INDEX_STRIDE. That is one Py_ssize_t per 64 codepoints
+// (0.125 bytes per codepoint on 64-bit) instead of 4 bytes per codepoint.
+static int build_index(Utf8StringObject *self) {
+    Py_ssize_t *index = PyMem_New(Py_ssize_t, index_entries(self));
+    if (!index) {
+        PyErr_NoMemory();
+        return -1;
     }
 
-    self->offsets = (int32_t *)PyMem_Malloc((self->length + 1) * sizeof(int32_t));
-    if (!self->offsets) {
-        return; // Memory allocation failed
-    }
-
-    int32_t byte_pos = 0;
-    int32_t codepoint_pos = 0;
-
-    self->offsets[0] = 0;
-
-    while (byte_pos < self->utf8_size && codepoint_pos < self->length) {
-        int char_len = utf8_char_length((unsigned char)self->utf8_data[byte_pos]);
-        byte_pos += char_len;
-        codepoint_pos++;
-        if (codepoint_pos <= self->length) {
-            self->offsets[codepoint_pos] = byte_pos;
+    Py_ssize_t byte_pos = 0;
+    for (Py_ssize_t cp = 0; cp < self->length; cp++) {
+        if (cp % MINISTR_INDEX_STRIDE == 0) {
+            index[cp / MINISTR_INDEX_STRIDE] = byte_pos;
         }
+        byte_pos += utf8_char_length((unsigned char)self->utf8_data[byte_pos]);
     }
+
+    self->index = index;
+    return 0;
+}
+
+// Byte offset of codepoint cp, for 0 <= cp <= length. Jumps to the nearest
+// index entry at or before cp and scans forward at most
+// MINISTR_INDEX_STRIDE - 1 characters. Returns -1 with an exception set if
+// the index could not be built.
+static Py_ssize_t byte_offset(Utf8StringObject *self, Py_ssize_t cp) {
+    if (self->utf8_size == self->length) {
+        return cp; // ASCII: one byte per codepoint, no index needed
+    }
+    if (cp == self->length) {
+        return self->utf8_size;
+    }
+    if (!self->index && build_index(self) < 0) {
+        return -1;
+    }
+
+    Py_ssize_t byte_pos = self->index[cp / MINISTR_INDEX_STRIDE];
+    for (Py_ssize_t i = cp % MINISTR_INDEX_STRIDE; i > 0; i--) {
+        byte_pos += utf8_char_length((unsigned char)self->utf8_data[byte_pos]);
+    }
+    return byte_pos;
 }
 
 // Deallocation function
@@ -71,8 +101,8 @@ static void Utf8String_dealloc(Utf8StringObject *self) {
     if (self->utf8_data) {
         PyMem_Free(self->utf8_data);
     }
-    if (self->offsets) {
-        PyMem_Free(self->offsets);
+    if (self->index) {
+        PyMem_Free(self->index);
     }
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
@@ -93,18 +123,11 @@ static PyObject *Utf8String_getitem(Utf8StringObject *self, Py_ssize_t index) {
         return NULL;
     }
 
-    if (!self->offsets) {
-        build_offset_table(self);
-        if (!self->offsets) {
-            PyErr_SetString(PyExc_MemoryError, "Failed to build offset table");
-            return NULL;
-        }
-    }
+    Py_ssize_t start_byte = byte_offset(self, index);
+    if (start_byte < 0) return NULL;
 
-    int32_t start_byte = self->offsets[index];
-    int32_t end_byte = (index + 1 < self->length) ? self->offsets[index + 1] : self->utf8_size;
-
-    return PyUnicode_FromStringAndSize(self->utf8_data + start_byte, end_byte - start_byte);
+    int char_len = utf8_char_length((unsigned char)self->utf8_data[start_byte]);
+    return PyUnicode_FromStringAndSize(self->utf8_data + start_byte, char_len);
 }
 
 // Slicing support
@@ -115,16 +138,10 @@ static PyObject *Utf8String_getslice(Utf8StringObject *self, Py_ssize_t start, P
         return Utf8String_FromUTF8("", 0);
     }
 
-    if (!self->offsets) {
-        build_offset_table(self);
-        if (!self->offsets) {
-            PyErr_SetString(PyExc_MemoryError, "Failed to build offset table");
-            return NULL;
-        }
-    }
-
-    int32_t start_byte = self->offsets[start];
-    int32_t end_byte = (stop < self->length) ? self->offsets[stop] : self->utf8_size;
+    Py_ssize_t start_byte = byte_offset(self, start);
+    if (start_byte < 0) return NULL;
+    Py_ssize_t end_byte = byte_offset(self, stop);
+    if (end_byte < 0) return NULL;
 
     return Utf8String_FromUTF8(self->utf8_data + start_byte, end_byte - start_byte);
 }
@@ -249,8 +266,8 @@ static PyObject *Utf8String_richcompare(Utf8StringObject *self, PyObject *other,
 // __sizeof__ method: the object plus the buffers it owns
 static PyObject *Utf8String_sizeof(Utf8StringObject *self, PyObject *Py_UNUSED(ignored)) {
     Py_ssize_t size = Py_TYPE(self)->tp_basicsize + self->utf8_size + 1;
-    if (self->offsets) {
-        size += (self->length + 1) * sizeof(int32_t);
+    if (self->index) {
+        size += index_entries(self) * sizeof(Py_ssize_t);
     }
     return PyLong_FromSsize_t(size);
 }
@@ -260,8 +277,7 @@ static PyMethodDef Utf8String_methods[] = {
     {NULL, NULL, 0, NULL}
 };
 
-// Iterator: walks the UTF-8 bytes once, so iterating never needs the
-// offset table
+// Iterator: walks the UTF-8 bytes once, so iterating never needs the index
 typedef struct {
     PyObject_HEAD
     Utf8StringObject *str;  // NULL once exhausted
@@ -412,7 +428,7 @@ PyObject *Utf8String_FromUTF8(const char *data, Py_ssize_t size) {
     // PyObject_New does not zero memory. Set every pointer the destructor
     // frees before the first allocation that can fail.
     self->utf8_data = NULL;
-    self->offsets = NULL;
+    self->index = NULL;
     self->hash = -1;
 
     // Copy UTF-8 data
